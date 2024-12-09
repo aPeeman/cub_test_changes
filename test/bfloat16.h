@@ -32,11 +32,14 @@
  * Utilities for interacting with the opaque CUDA __nv_bfloat16 type
  */
 
-#include <stdint.h>
-#include <cuda_bf16.h>
-#include <iosfwd>
-
 #include <cub/util_type.cuh>
+
+#include <cuda_bf16.h>
+
+#include <cuda/std/type_traits>
+
+#include <cstdint>
+#include <iosfwd>
 
 #ifdef __GNUC__
 // There's a ton of type-punning going on in this file.
@@ -68,6 +71,23 @@ struct bfloat16_t
     bfloat16_t(int a)
     {
         *this = bfloat16_t(float(a));
+    }
+
+    /// Constructor from std::size_t
+    __host__ __device__ __forceinline__
+    bfloat16_t(std::size_t a)
+    {
+        *this = bfloat16_t(float(a));
+    }
+
+    /// Constructor from unsigned long long int
+    template < typename T,
+               typename = typename ::cuda::std::enable_if<
+                 ::cuda::std::is_same<T, unsigned long long int>::value
+                 && (!::cuda::std::is_same<std::size_t, unsigned long long int>::value)>::type>
+    __host__ __device__ __forceinline__ bfloat16_t(T a)
+    {
+      *this = bfloat16_t(float(a));
     }
 
     /// Default constructor
@@ -115,21 +135,21 @@ struct bfloat16_t
 
     /// Get raw storage
     __host__ __device__ __forceinline__
-    uint16_t raw()
+    uint16_t raw() const
     {
         return this->__x;
     }
 
     /// Equality
     __host__ __device__ __forceinline__
-    bool operator ==(const bfloat16_t &other)
+    bool operator ==(const bfloat16_t &other) const
     {
         return (this->__x == other.__x);
     }
 
     /// Inequality
     __host__ __device__ __forceinline__
-    bool operator !=(const bfloat16_t &other)
+    bool operator !=(const bfloat16_t &other) const
     {
         return (this->__x != other.__x);
     }
@@ -186,7 +206,7 @@ struct bfloat16_t
 
     /// numeric_traits<bfloat16_t>::max
     __host__ __device__ __forceinline__
-    static bfloat16_t max() {
+    static bfloat16_t (max)() {
         uint16_t max_word = 0x7F7F;
         return reinterpret_cast<bfloat16_t&>(max_word);
     }
@@ -205,7 +225,7 @@ struct bfloat16_t
  ******************************************************************************/
 
 /// Insert formatted \p bfloat16_t into the output stream
-std::ostream& operator<<(std::ostream &out, const bfloat16_t &x)
+inline std::ostream& operator<<(std::ostream &out, const bfloat16_t &x)
 {
     out << (float)x;
     return out;
@@ -213,7 +233,7 @@ std::ostream& operator<<(std::ostream &out, const bfloat16_t &x)
 
 
 /// Insert formatted \p __nv_bfloat16 into the output stream
-std::ostream& operator<<(std::ostream &out, const __nv_bfloat16 &x)
+inline std::ostream& operator<<(std::ostream &out, const __nv_bfloat16 &x)
 {
     return out << bfloat16_t(x);
 }

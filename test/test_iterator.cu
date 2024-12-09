@@ -43,16 +43,12 @@
 #include <cub/iterator/constant_input_iterator.cuh>
 #include <cub/iterator/counting_input_iterator.cuh>
 #include <cub/iterator/tex_obj_input_iterator.cuh>
-#include <cub/iterator/tex_ref_input_iterator.cuh>
 #include <cub/iterator/transform_input_iterator.cuh>
 
 #include <cub/util_type.cuh>
 #include <cub/util_allocator.cuh>
 
 #include "test_util.h"
-
-#include <thrust/device_ptr.h>
-#include <thrust/copy.h>
 
 using namespace cub;
 
@@ -68,7 +64,6 @@ CachingDeviceAllocator  g_allocator(true);
 enum Backend
 {
     CUB,        // CUB method
-    THRUST,     // Thrust method
     CDP,        // GPU-based (dynamic parallelism) dispatch to CUB method
 };
 
@@ -199,33 +194,6 @@ void TestConstant(T base)
     T h_reference[8] = {base, base, base, base, base, base, base, base};
     ConstantInputIterator<T> d_itr(base);
     Test(d_itr, h_reference);
-
-#if (THRUST_VERSION >= 100700)  // Thrust 1.7 or newer
-
-    //
-    // Test with thrust::copy_if()
-    //
-
-    int copy_items  = 100;
-    T   *h_copy     = new T[copy_items];
-    T   *d_copy     = NULL;
-
-    for (int i = 0; i < copy_items; ++i)
-        h_copy[i] = d_itr[i];
-
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_copy, sizeof(T) * copy_items));
-    THRUST_NS_QUALIFIER::device_ptr<T> d_copy_wrapper(d_copy);
-
-    THRUST_NS_QUALIFIER::copy_if(d_itr, d_itr + copy_items, d_copy_wrapper, SelectOp());
-
-    int compare = CompareDeviceResults(h_copy, d_copy, copy_items, g_verbose, g_verbose);
-    printf("\tthrust::copy_if(): %s\n", (compare) ? "FAIL" : "PASS");
-    AssertEquals(0, compare);
-
-    if (h_copy) delete[] h_copy;
-    if (d_copy) CubDebugExit(g_allocator.DeviceFree(d_copy));
-
-#endif // THRUST_VERSION
 }
 
 
@@ -254,33 +222,6 @@ void TestCounting(T base)
 
     CountingInputIterator<T> d_itr(base);
     Test(d_itr, h_reference);
-
-#if (THRUST_VERSION >= 100700)  // Thrust 1.7 or newer
-
-    //
-    // Test with thrust::copy_if()
-    //
-
-    unsigned long long  max_items   = ((1ull << ((sizeof(T) * 8) - 1)) - 1);
-    size_t  copy_items              = (size_t) CUB_MIN(max_items - base, 100);     // potential issue with differencing overflows when T is a smaller type than can handle the offset
-    T                   *h_copy     = new T[copy_items];
-    T                   *d_copy     = NULL;
-
-    for (unsigned long long i = 0; i < copy_items; ++i)
-        h_copy[i] = d_itr[i];
-
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_copy, sizeof(T) * copy_items));
-    THRUST_NS_QUALIFIER::device_ptr<T> d_copy_wrapper(d_copy);
-    THRUST_NS_QUALIFIER::copy_if(d_itr, d_itr + copy_items, d_copy_wrapper, SelectOp());
-
-    int compare = CompareDeviceResults(h_copy, d_copy, copy_items, g_verbose, g_verbose);
-    printf("\tthrust::copy_if(): %s\n", (compare) ? "FAIL" : "PASS");
-    AssertEquals(0, compare);
-
-    if (h_copy) delete[] h_copy;
-    if (d_copy) CubDebugExit(g_allocator.DeviceFree(d_copy));
-
-#endif // THRUST_VERSION
 }
 
 
@@ -328,29 +269,6 @@ void TestModified()
     Test(CacheModifiedInputIterator<LOAD_LDG, T>((CastT*) d_data), h_reference);
     Test(CacheModifiedInputIterator<LOAD_VOLATILE, T>((CastT*) d_data), h_reference);
 
-#if (THRUST_VERSION >= 100700)  // Thrust 1.7 or newer
-
-    //
-    // Test with thrust::copy_if()
-    //
-
-    T *d_copy = NULL;
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_copy, sizeof(T) * TEST_VALUES));
-
-    CacheModifiedInputIterator<LOAD_CG, T> d_in_itr((CastT*) d_data);
-    CacheModifiedOutputIterator<STORE_CG, T> d_out_itr((CastT*) d_copy);
-
-    THRUST_NS_QUALIFIER::copy_if(d_in_itr, d_in_itr + TEST_VALUES, d_out_itr, SelectOp());
-
-    int compare = CompareDeviceResults(h_data, d_copy, TEST_VALUES, g_verbose, g_verbose);
-    printf("\tthrust::copy_if(): %s\n", (compare) ? "FAIL" : "PASS");
-    AssertEquals(0, compare);
-
-    // Cleanup
-    if (d_copy) CubDebugExit(g_allocator.DeviceFree(d_copy));
-
-#endif // THRUST_VERSION
-
     if (h_data) delete[] h_data;
     if (d_data) CubDebugExit(g_allocator.DeviceFree(d_data));
 }
@@ -397,32 +315,6 @@ void TestTransform()
     TransformInputIterator<T, TransformOp<T>, CastT*> d_itr((CastT*) d_data, op);
     Test(d_itr, h_reference);
 
-#if (THRUST_VERSION >= 100700)  // Thrust 1.7 or newer
-
-    //
-    // Test with thrust::copy_if()
-    //
-
-    T *h_copy = new T[TEST_VALUES];
-    for (int i = 0; i < TEST_VALUES; ++i)
-        h_copy[i] = op(h_data[i]);
-
-    T *d_copy = NULL;
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_copy, sizeof(T) * TEST_VALUES));
-    THRUST_NS_QUALIFIER::device_ptr<T> d_copy_wrapper(d_copy);
-
-    THRUST_NS_QUALIFIER::copy_if(d_itr, d_itr + TEST_VALUES, d_copy_wrapper, SelectOp());
-
-    int compare = CompareDeviceResults(h_copy, d_copy, TEST_VALUES, g_verbose, g_verbose);
-    printf("\tthrust::copy_if(): %s\n", (compare) ? "FAIL" : "PASS");
-    AssertEquals(0, compare);
-
-    // Cleanup
-    if (h_copy) delete[] h_copy;
-    if (d_copy) CubDebugExit(g_allocator.DeviceFree(d_copy));
-
-#endif // THRUST_VERSION
-
     if (h_data) delete[] h_data;
     if (d_data) CubDebugExit(g_allocator.DeviceFree(d_data));
 }
@@ -440,9 +332,9 @@ void TestTexObj()
     // Test iterator manipulation in kernel
     //
 
-    const unsigned int TEST_VALUES          = 11000;
-    const unsigned int DUMMY_OFFSET         = 500;
-    const unsigned int DUMMY_TEST_VALUES    = TEST_VALUES - DUMMY_OFFSET;
+    constexpr unsigned int TEST_VALUES          = 11000;
+    constexpr unsigned int DUMMY_OFFSET         = 500;
+    constexpr unsigned int DUMMY_TEST_VALUES    = TEST_VALUES - DUMMY_OFFSET;
 
     T *h_data = new T[TEST_VALUES];
     for (unsigned int i = 0; i < TEST_VALUES; ++i)
@@ -476,119 +368,10 @@ void TestTexObj()
 
     Test(d_obj_itr, h_reference);
 
-#if (THRUST_VERSION >= 100700)  // Thrust 1.7 or newer
-
-    //
-    // Test with thrust::copy_if()
-    //
-
-    T *d_copy = NULL;
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_copy, sizeof(T) * TEST_VALUES));
-    THRUST_NS_QUALIFIER::device_ptr<T> d_copy_wrapper(d_copy);
-
-    CubDebugExit(cudaMemset(d_copy, 0, sizeof(T) * TEST_VALUES));
-    THRUST_NS_QUALIFIER::copy_if(d_obj_itr, d_obj_itr + TEST_VALUES, d_copy_wrapper, SelectOp());
-
-    int compare = CompareDeviceResults(h_data, d_copy, TEST_VALUES, g_verbose, g_verbose);
-    printf("\tthrust::copy_if(): %s\n", (compare) ? "FAIL" : "PASS");
-    AssertEquals(0, compare);
-
-    // Cleanup
-    CubDebugExit(d_obj_itr.UnbindTexture());
-
-    if (d_copy) CubDebugExit(g_allocator.DeviceFree(d_copy));
-
-#endif  // THRUST_VERSION
-
     if (h_data) delete[] h_data;
     if (d_data) CubDebugExit(g_allocator.DeviceFree(d_data));
     if (d_dummy) CubDebugExit(g_allocator.DeviceFree(d_dummy));
 }
-
-
-#if CUDART_VERSION >= 5050
-
-/**
- * Test tex-ref texture iterator
- */
-template <typename T, typename CastT>
-void TestTexRef()
-{
-    printf("\nTesting tex-ref iterator on type %s\n", typeid(T).name()); fflush(stdout);
-
-    //
-    // Test iterator manipulation in kernel
-    //
-
-    constexpr int TEST_VALUES                   = 11000;
-    constexpr unsigned int DUMMY_OFFSET         = 500;
-    constexpr unsigned int DUMMY_TEST_VALUES    = TEST_VALUES - DUMMY_OFFSET;
-
-    T *h_data = new T[TEST_VALUES];
-    for (int i = 0; i < TEST_VALUES; ++i)
-    {
-        RandomBits(h_data[i]);
-    }
-
-    // Allocate device arrays
-    T *d_data   = NULL;
-    T *d_dummy  = NULL;
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_data, sizeof(T) * TEST_VALUES));
-    CubDebugExit(cudaMemcpy(d_data, h_data, sizeof(T) * TEST_VALUES, cudaMemcpyHostToDevice));
-
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_dummy, sizeof(T) * DUMMY_TEST_VALUES));
-    CubDebugExit(cudaMemcpy(d_dummy, h_data + DUMMY_OFFSET, sizeof(T) * DUMMY_TEST_VALUES, cudaMemcpyHostToDevice));
-
-    // Initialize reference data
-    T h_reference[8];
-    h_reference[0] = h_data[0];          // Value at offset 0
-    h_reference[1] = h_data[100];        // Value at offset 100
-    h_reference[2] = h_data[1000];       // Value at offset 1000
-    h_reference[3] = h_data[10000];      // Value at offset 10000
-    h_reference[4] = h_data[1];          // Value at offset 1
-    h_reference[5] = h_data[21];         // Value at offset 21
-    h_reference[6] = h_data[11];         // Value at offset 11
-    h_reference[7] = h_data[0];          // Value at offset 0;
-
-    // Create and bind ref-based test iterator
-    TexRefInputIterator<T, __LINE__> d_ref_itr;
-    CubDebugExit(d_ref_itr.BindTexture((CastT*) d_data, sizeof(T) * TEST_VALUES));
-
-    // Create and bind dummy iterator of same type to check with interferance
-    TexRefInputIterator<T, __LINE__> d_ref_itr2;
-    CubDebugExit(d_ref_itr2.BindTexture((CastT*) d_dummy, sizeof(T) * DUMMY_TEST_VALUES));
-
-    Test(d_ref_itr, h_reference);
-
-#if (THRUST_VERSION >= 100700)  // Thrust 1.7 or newer
-
-    //
-    // Test with thrust::copy_if()
-    //
-
-    T *d_copy = NULL;
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_copy, sizeof(T) * TEST_VALUES));
-    THRUST_NS_QUALIFIER::device_ptr<T> d_copy_wrapper(d_copy);
-
-    CubDebugExit(cudaMemset(d_copy, 0, sizeof(T) * TEST_VALUES));
-    THRUST_NS_QUALIFIER::copy_if(d_ref_itr, d_ref_itr + TEST_VALUES, d_copy_wrapper, SelectOp());
-
-    int compare = CompareDeviceResults(h_data, d_copy, TEST_VALUES, g_verbose, g_verbose);
-    printf("\tthrust::copy_if(): %s\n", (compare) ? "FAIL" : "PASS");
-    AssertEquals(0, compare);
-
-    if (d_copy) CubDebugExit(g_allocator.DeviceFree(d_copy));
-
-#endif  // THRUST_VERSION
-
-    CubDebugExit(d_ref_itr.UnbindTexture());
-    CubDebugExit(d_ref_itr2.UnbindTexture());
-
-    if (h_data) delete[] h_data;
-    if (d_data) CubDebugExit(g_allocator.DeviceFree(d_data));
-    if (d_dummy) CubDebugExit(g_allocator.DeviceFree(d_dummy));
-}
-
 
 /**
  * Test texture transform iterator
@@ -639,41 +422,10 @@ void TestTexTransform()
 
     Test(xform_itr, h_reference);
 
-#if (THRUST_VERSION >= 100700)  // Thrust 1.7 or newer
-
-    //
-    // Test with thrust::copy_if()
-    //
-
-    T *h_copy = new T[TEST_VALUES];
-    for (int i = 0; i < TEST_VALUES; ++i)
-        h_copy[i] = op(h_data[i]);
-
-    T *d_copy = NULL;
-    CubDebugExit(g_allocator.DeviceAllocate((void**)&d_copy, sizeof(T) * TEST_VALUES));
-    THRUST_NS_QUALIFIER::device_ptr<T> d_copy_wrapper(d_copy);
-
-    THRUST_NS_QUALIFIER::copy_if(xform_itr, xform_itr + TEST_VALUES, d_copy_wrapper, SelectOp());
-
-    int compare = CompareDeviceResults(h_copy, d_copy, TEST_VALUES, g_verbose, g_verbose);
-    printf("\tthrust::copy_if(): %s\n", (compare) ? "FAIL" : "PASS");
-    AssertEquals(0, compare);
-
-    // Cleanup
-    if (h_copy) delete[] h_copy;
-    if (d_copy) CubDebugExit(g_allocator.DeviceFree(d_copy));
-
-#endif  // THRUST_VERSION
-
     CubDebugExit(d_tex_itr.UnbindTexture());
     if (h_data) delete[] h_data;
     if (d_data) CubDebugExit(g_allocator.DeviceFree(d_data));
 }
-
-#endif  // CUDART_VERSION
-
-
-
 
 /**
  * Run non-integer tests
@@ -683,17 +435,8 @@ void Test(Int2Type<false> /* is_integer */)
 {
     TestModified<T, CastT>();
     TestTransform<T, CastT>();
-
-#if CUB_CDP
-    // Test tex-obj iterators if CUDA dynamic parallelism enabled
-    TestTexObj<T, CastT>(type_string);
-#endif  // CUB_CDP
-
-#if CUDART_VERSION >= 5050
-    // Test tex-ref iterators for CUDA 5.5
-    TestTexRef<T, CastT>();
+    TestTexObj<T, CastT>();
     TestTexTransform<T, CastT>();
-#endif  // CUDART_VERSION
 }
 
 /**
@@ -757,14 +500,13 @@ int main(int argc, char** argv)
     CubDebugExit(PtxVersion(ptx_version));
 
     // Evaluate different data types
-    Test<char>();
+    Test<signed char>();
     Test<short>();
     Test<int>();
     Test<long>();
     Test<long long>();
     Test<float>();
-    if (ptx_version > 120)                          // Don't check doubles on PTX120 or below because they're down-converted
-        Test<double>();
+    Test<double>();
 
     Test<char2>();
     Test<short2>();
@@ -772,8 +514,7 @@ int main(int argc, char** argv)
     Test<long2>();
     Test<longlong2>();
     Test<float2>();
-    if (ptx_version > 120)                          // Don't check doubles on PTX120 or below because they're down-converted
-        Test<double2>();
+    Test<double2>();
 
     Test<char3>();
     Test<short3>();
@@ -781,8 +522,7 @@ int main(int argc, char** argv)
     Test<long3>();
     Test<longlong3>();
     Test<float3>();
-    if (ptx_version > 120)                          // Don't check doubles on PTX120 or below because they're down-converted
-        Test<double3>();
+    Test<double3>();
 
     Test<char4>();
     Test<short4>();
@@ -790,8 +530,7 @@ int main(int argc, char** argv)
     Test<long4>();
     Test<longlong4>();
     Test<float4>();
-    if (ptx_version > 120)                          // Don't check doubles on PTX120 or below because they're down-converted
-        Test<double4>();
+    Test<double4>();
 
     Test<TestFoo>();
     Test<TestBar>();

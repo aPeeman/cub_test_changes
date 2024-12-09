@@ -179,10 +179,9 @@ struct csr_matrix
 
 private:
   template <typename VecValueT>
-  using vector_t =
-    typename std::conditional<HostStorage,
-                              thrust::host_vector<VecValueT>,
-                              thrust::device_vector<VecValueT>>::type;
+  using vector_t = cub::detail::conditional_t<HostStorage,
+                                              thrust::host_vector<VecValueT>,
+                                              thrust::device_vector<VecValueT>>;
 
   vector_t<ValueT> m_values;
   vector_t<int> m_row_offsets;
@@ -290,10 +289,10 @@ host_csr_matrix<ValueT> make_random_csr_matrix(int num_rows,
 
       if (std::is_floating_point<ValueT>::value)
       {
-        // Keep fp numbers somewhat small, from -100 -> 100; otherwise we run
+        // Keep fp numbers somewhat small, from -50 -> 50; otherwise we run
         // into issues with nans/infs
         ValueT value =
-          (RandomValue(static_cast<ValueT>(200)) - static_cast<ValueT>(100));
+          (RandomValue(static_cast<ValueT>(100)) - static_cast<ValueT>(50));
         mat.append_value(row, col, value);
       }
       else
@@ -341,7 +340,7 @@ thrust::host_vector<ValueT> make_random_vector(int len)
     if (std::is_floating_point<ValueT>::value)
     { // Keep fp numbers somewhat small; otherwise we run into issues with
       // nans/infs
-      val = RandomValue(static_cast<ValueT>(200)) - static_cast<ValueT>(100);
+      val = RandomValue(static_cast<ValueT>(100)) - static_cast<ValueT>(50);
     }
     else
     {
@@ -412,9 +411,7 @@ void compute_cub_solution(const device_csr_matrix<ValueT>& a,
                                thrust::raw_pointer_cast(y.data()),
                                a.get_num_rows(),
                                a.get_num_columns(),
-                               a.get_num_nonzeros(),
-                               0,
-                               true);
+                               a.get_num_nonzeros());
   CubDebugExit(err);
 }
 
@@ -526,14 +523,14 @@ void test_random()
   test_random<ValueT>(0, 1, 1.f);
   test_random<ValueT>(1, 0, 1.f);
 
-  const int dim_min = 1;
-  const int dim_max = 10000;
+  constexpr int dim_min = 1;
+  constexpr int dim_max = 10000;
 
-  const int max_num_elems = 100000;
+  constexpr int max_num_elems = 100000;
 
-  const float ratio_min  = 0.f;
-  const float ratio_max  = 1.1f; // a lil over to account for fp errors
-  const float ratio_step = 0.3334f;
+  constexpr float ratio_min  = 0.f;
+  constexpr float ratio_max  = 1.1f; // a lil over to account for fp errors
+  constexpr float ratio_step = 0.3334f;
 
   for (int rows = dim_min; rows < dim_max; rows <<= 1)
   {
@@ -569,9 +566,9 @@ void test_types()
 {
   test_type<float>();
   test_type<double>();
-  test_type<char>();
+  test_type<signed char>();
   test_type<int>();
-  test_type<unsigned long long>();
+  test_type<long long>();
 }
 
 int main(int argc, char** argv)

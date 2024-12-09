@@ -33,11 +33,15 @@
  * Utilities for interacting with the opaque CUDA __half type
  */
 
-#include <stdint.h>
-#include <cuda_fp16.h>
-#include <iosfwd>
-
 #include <cub/util_type.cuh>
+
+#include <cuda_fp16.h>
+
+#include <cuda/std/type_traits>
+
+#include <cstdint>
+#include <cstring>
+#include <iosfwd>
 
 #ifdef __GNUC__
 // There's a ton of type-punning going on in this file.
@@ -69,6 +73,23 @@ struct half_t
     half_t(int a)
     {
         *this = half_t(float(a));
+    }
+
+    /// Constructor from std::size_t
+    __host__ __device__ __forceinline__
+    half_t(std::size_t a)
+    {
+        *this = half_t(float(a));
+    }
+
+    /// Constructor from unsigned long long int
+    template < typename T,
+               typename = typename ::cuda::std::enable_if<
+                 ::cuda::std::is_same<T, unsigned long long int>::value
+                 && (!::cuda::std::is_same<std::size_t, unsigned long long int>::value)>::type>
+    __host__ __device__ __forceinline__ half_t(T a)
+    {
+      *this = half_t(float(a));
     }
 
     /// Default constructor
@@ -143,7 +164,7 @@ struct half_t
         int sign        = ((this->__x >> 15) & 1);
         int exp         = ((this->__x >> 10) & 0x1f);
         int mantissa    = (this->__x & 0x3ff);
-        uint32_t f      = 0;
+        std::uint32_t f = 0;
 
         if (exp > 0 && exp < 31)
         {
@@ -185,27 +206,31 @@ struct half_t
                 f = (0xff << 23) | (sign << 31);    //  inf
             }
         }
-        return *reinterpret_cast<float const *>(&f);
+
+	static_assert(sizeof(float) == sizeof(std::uint32_t), "4-byte size check");
+	float ret{};
+	std::memcpy(&ret, &f, sizeof(float));
+	return ret;
     }
 
 
     /// Get raw storage
     __host__ __device__ __forceinline__
-    uint16_t raw()
+    uint16_t raw() const
     {
         return this->__x;
     }
 
     /// Equality
     __host__ __device__ __forceinline__
-    bool operator ==(const half_t &other)
+    bool operator ==(const half_t &other) const
     {
         return (this->__x == other.__x);
     }
 
     /// Inequality
     __host__ __device__ __forceinline__
-    bool operator !=(const half_t &other)
+    bool operator !=(const half_t &other) const
     {
         return (this->__x != other.__x);
     }
@@ -224,12 +249,26 @@ struct half_t
     {
         return half_t(float(*this) * float(other));
     }
+    
+    /// Divide
+    __host__ __device__ __forceinline__
+    half_t operator/(const half_t &other) const
+    {
+        return half_t(float(*this) / float(other));
+    }
 
     /// Add
     __host__ __device__ __forceinline__
     half_t operator+(const half_t &other)
     {
         return half_t(float(*this) + float(other));
+    }
+    
+    /// Sub
+    __host__ __device__ __forceinline__
+    half_t operator-(const half_t &other) const
+    {
+        return half_t(float(*this) - float(other));
     }
 
     /// Less-than
@@ -262,7 +301,7 @@ struct half_t
 
     /// numeric_traits<half_t>::max
     __host__ __device__ __forceinline__
-    static half_t max() {
+    static half_t (max)() {
         uint16_t max_word = 0x7BFF;
         return reinterpret_cast<half_t&>(max_word);
     }
@@ -281,7 +320,7 @@ struct half_t
  ******************************************************************************/
 
 /// Insert formatted \p half_t into the output stream
-std::ostream& operator<<(std::ostream &out, const half_t &x)
+inline std::ostream& operator<<(std::ostream &out, const half_t &x)
 {
     out << (float)x;
     return out;
@@ -289,7 +328,7 @@ std::ostream& operator<<(std::ostream &out, const half_t &x)
 
 
 /// Insert formatted \p __half into the output stream
-std::ostream& operator<<(std::ostream &out, const __half &x)
+inline std::ostream& operator<<(std::ostream &out, const __half &x)
 {
     return out << half_t(x);
 }
@@ -302,7 +341,7 @@ std::ostream& operator<<(std::ostream &out, const __half &x)
 template <>
 struct CUB_NS_QUALIFIER::FpLimits<half_t>
 {
-    static __host__ __device__ __forceinline__ half_t Max() { return half_t::max(); }
+    static __host__ __device__ __forceinline__ half_t Max() { return (half_t::max)(); }
 
     static __host__ __device__ __forceinline__ half_t Lowest() { return half_t::lowest(); }
 };

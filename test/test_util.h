@@ -36,28 +36,30 @@
     #include <sys/resource.h>
 #endif
 
-#include <cstdio>
+#include <cub/iterator/discard_output_iterator.cuh>
+#include <cub/util_debug.cuh>
+#include <cub/util_device.cuh>
+#include <cub/util_macro.cuh>
+#include <cub/util_math.cuh>
+#include <cub/util_namespace.cuh>
+#include <cub/util_ptx.cuh>
+#include <cub/util_type.cuh>
+
 #include <cfloat>
 #include <cmath>
 #include <cstddef>
-
-#include <string>
-#include <vector>
-#include <sstream>
+#include <cstdio>
 #include <iostream>
 #include <limits>
+#include <sstream>
+#include <string>
+#include <vector>
 
+#include "c2h/extended_types.cuh"
 #include "mersenne.h"
-#include "half.h"
-#include "bfloat16.h"
-
-#include "cub/util_debug.cuh"
-#include "cub/util_device.cuh"
-#include "cub/util_type.cuh"
-#include "cub/util_macro.cuh"
-#include "cub/util_math.cuh"
-#include "cub/util_ptx.cuh"
-#include "cub/iterator/discard_output_iterator.cuh"
+#include "test_util_vec.h"
+#include "test_warning_suppression.cuh"
+#include <nv/target>
 
 /******************************************************************************
  * Type conversion macros
@@ -68,6 +70,7 @@
  * Types `T` and `U` must be the same size.
  */
 template <typename T, typename U>
+__host__ __device__
 T SafeBitCast(const U& in)
 {
   static_assert(sizeof(T) == sizeof(U), "Types must be same size.");
@@ -342,6 +345,16 @@ struct CommandLineArgs
     }
 };
 
+// Gets the amount of global memory of the current device.
+std::size_t TotalGlobalMem()
+{
+    int device = 0;
+    CubDebugExit(cudaGetDevice(&device));
+    std::size_t free_mem = 0, total_mem = 0;
+    CubDebugExit(cudaMemGetInfo(&free_mem, &total_mem));
+    return total_mem;
+}
+
 /******************************************************************************
  * Random bits generator
  ******************************************************************************/
@@ -413,6 +426,7 @@ __noinline__ bool IsNaN<double4>(double4 val)
 }
 
 
+#ifdef TEST_HALF_T
 template<>
 __noinline__ bool IsNaN<half_t>(half_t val)
 {
@@ -422,7 +436,9 @@ __noinline__ bool IsNaN<half_t>(half_t val)
     return (((bits >= 0x7C01) && (bits <= 0x7FFF)) ||
         ((bits >= 0xFC01) /*&& (bits <= 0xFFFFFFFF)*/));
 }
+#endif
 
+#ifdef TEST_BF_T
 template<>
 __noinline__ bool IsNaN<bfloat16_t>(bfloat16_t val)
 {
@@ -432,6 +448,7 @@ __noinline__ bool IsNaN<bfloat16_t>(bfloat16_t val)
     return (((bits >= 0x7F81) && (bits <= 0x7FFF)) ||
         ((bits >= 0xFF81) /*&& (bits <= 0xFFFFFFFF)*/));
 }
+#endif
 
 /**
  * Generates random keys.
@@ -462,9 +479,9 @@ void RandomBits(
     int begin_bit = 0,
     int end_bit = sizeof(K) * 8)
 {
-    const int NUM_BYTES = sizeof(K);
-    const int WORD_BYTES = sizeof(unsigned int);
-    const int NUM_WORDS = (NUM_BYTES + WORD_BYTES - 1) / WORD_BYTES;
+    constexpr int NUM_BYTES = sizeof(K);
+    constexpr int WORD_BYTES = sizeof(unsigned int);
+    constexpr int NUM_WORDS = (NUM_BYTES + WORD_BYTES - 1) / WORD_BYTES;
 
     unsigned int word_buff[NUM_WORDS];
 
@@ -521,24 +538,6 @@ T RandomValue(T max)
 
 
 /******************************************************************************
- * Console printing utilities
- ******************************************************************************/
-
-/**
- * Helper for casting character types to integers for cout printing
- */
-template <typename T>
-T CoutCast(T val) { return val; }
-
-int CoutCast(char val) { return val; }
-
-int CoutCast(unsigned char val) { return val; }
-
-int CoutCast(signed char val) { return val; }
-
-
-
-/******************************************************************************
  * Test value initialization utilities
  ******************************************************************************/
 
@@ -559,134 +558,121 @@ enum GenMode
  */
 #pragma nv_exec_check_disable
 template <typename T>
-__host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, T &value, int index = 0)
+__host__ __device__ __forceinline__
+void InitValue(GenMode gen_mode, T &value, std::size_t index = 0)
 {
-    // RandomBits is host-only.
-    if (CUB_IS_DEVICE_CODE)
-    {
-        #if CUB_INCLUDE_DEVICE_CODE
-            switch (gen_mode)
-            {
-                case RANDOM:
-                case RANDOM_BIT:
-                case RANDOM_MINUS_PLUS_ZERO:
-                    _CubLog("%s\n",
-                            "cub::InitValue cannot generate random numbers on device.");
-                    CUB_NS_QUALIFIER::ThreadTrap();
-                    break;
-                case UNIFORM:
-                    value = 2;
-                    break;
-                case INTEGER_SEED:
-                default:
-                    value = (T) index;
-                    break;
-            }
-        #endif // CUB_INCLUDE_DEVICE_CODE
-    }
-    else
-    {
-        #if CUB_INCLUDE_HOST_CODE
-            switch (gen_mode)
-            {
-                case RANDOM:
-                    RandomBits(value);
-                    break;
-                case RANDOM_BIT:
-                {
-                    char c;
-                    RandomBits(c, 0, 0, 1);
-                    value = (c > 0) ? (T) 1 : (T) -1;
-                    break;
-                }
-                case RANDOM_MINUS_PLUS_ZERO:
-                {
-                    // Replace roughly 1/128 of values with -0.0 or +0.0, and generate the rest randomly
-                    typedef typename CUB_NS_QUALIFIER::Traits<T>::UnsignedBits UnsignedBits;
-                    char c;
-                    RandomBits(c);
-                    if (c == 0)
-                    {
-                        // Replace 1/256 of values with +0.0 bit pattern
-                        value = SafeBitCast<T>(UnsignedBits(0));
-                    }
-                    else if (c == 1)
-                    {
-                        // Replace 1/256 of values with -0.0 bit pattern
-                        value = SafeBitCast<T>(UnsignedBits(UnsignedBits(1) <<
-                                                            (sizeof(UnsignedBits) * 8) - 1));
-                    }
-                    else
-                    {
-                        // 127/128 of values are random
-                        RandomBits(value);
-                    }
-                    break;
-                }
-                case UNIFORM:
-                    value = 2;
-                    break;
-                case INTEGER_SEED:
-                default:
-                    value = (T) index;
-                    break;
-            }
-        #endif // CUB_INCLUDE_HOST_CODE
-    }
+  // RandomBits is host-only.
+  NV_IF_TARGET(
+    NV_IS_HOST,
+    (
+      switch (gen_mode) {
+      case RANDOM:
+        RandomBits(value);
+        break;
+      case RANDOM_BIT: {
+        char c;
+        RandomBits(c, 0, 0, 1);
+        value = static_cast<T>((c > 0) ? 1 : -1);
+        break;
+      }
+      case RANDOM_MINUS_PLUS_ZERO: {
+        // Replace roughly 1/128 of values with -0.0 or +0.0, and
+        // generate the rest randomly
+        using UnsignedBits = typename CUB_NS_QUALIFIER::Traits<T>::UnsignedBits;
+        char c;
+        RandomBits(c);
+        if (c == 0)
+        {
+          // Replace 1/256 of values with +0.0 bit pattern
+          value = SafeBitCast<T>(UnsignedBits(0));
+        }
+        else if (c == 1)
+        {
+          // Replace 1/256 of values with -0.0 bit pattern
+          value = SafeBitCast<T>(
+            UnsignedBits(UnsignedBits(1) << (sizeof(UnsignedBits) * 8) - 1));
+        }
+        else
+        {
+          // 127/128 of values are random
+          RandomBits(value);
+        }
+        break;
+      }
+      case UNIFORM:
+        value = 2;
+        break;
+      case INTEGER_SEED:
+      default:
+        value = static_cast<T>(index);
+        break;
+      }),
+    ( // NV_IS_DEVICE:
+      switch (gen_mode) {
+      case RANDOM:
+      case RANDOM_BIT:
+      case RANDOM_MINUS_PLUS_ZERO:
+        _CubLog("%s\n",
+                "cub::InitValue cannot generate random numbers on device.");
+        CUB_NS_QUALIFIER::ThreadTrap();
+        break;
+      case UNIFORM:
+        value = 2;
+        break;
+      case INTEGER_SEED:
+      default:
+        value = static_cast<T>(index);
+        break;
+      }
+    ));
 }
-
 
 /**
  * Initialize value (bool)
  */
 #pragma nv_exec_check_disable
-__host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, bool &value, int index = 0)
+__host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, bool &value, std::size_t index = 0)
 {
-    // RandomBits is host-only.
-    if (CUB_IS_DEVICE_CODE)
+  // RandomBits is host-only.
+  NV_IF_TARGET(
+    NV_IS_HOST,
+    (
+      switch (gen_mode)
+      {
+      case RANDOM:
+      case RANDOM_BIT:
+          char c;
+          RandomBits(c, 0, 0, 1);
+          value = (c > 0);
+          break;
+       case UNIFORM:
+          value = true;
+          break;
+      case INTEGER_SEED:
+      default:
+          value = (index > 0);
+          break;
+      }
+    ),
+  ( // NV_IS_DEVICE,
+    switch (gen_mode)
     {
-        #if CUB_INCLUDE_DEVICE_CODE
-            switch (gen_mode)
-            {
-                case RANDOM:
-                case RANDOM_BIT:
-                case RANDOM_MINUS_PLUS_ZERO:
-                    _CubLog("%s\n",
-                            "cub::InitValue cannot generate random numbers on device.");
-                    CUB_NS_QUALIFIER::ThreadTrap();
-                    break;
-                case UNIFORM:
-                    value = true;
-                    break;
-                case INTEGER_SEED:
-                default:
-                    value = (index > 0);
-                    break;
-            }
-        #endif // CUB_INCLUDE_DEVICE_CODE
+      case RANDOM:
+      case RANDOM_BIT:
+      case RANDOM_MINUS_PLUS_ZERO:
+        _CubLog("%s\n",
+                "cub::InitValue cannot generate random numbers on device.");
+        CUB_NS_QUALIFIER::ThreadTrap();
+        break;
+      case UNIFORM:
+        value = true;
+        break;
+      case INTEGER_SEED:
+      default:
+        value = (index > 0);
+        break;
     }
-    else
-    {
-        #if CUB_INCLUDE_HOST_CODE
-            switch (gen_mode)
-            {
-                case RANDOM:
-                case RANDOM_BIT:
-                case RANDOM_MINUS_PLUS_ZERO:
-                    char c;
-                    RandomBits(c, 0, 0, 1);
-                    value = (c > 0);
-                    break;
-                case UNIFORM:
-                    value = true;
-                    break;
-                case INTEGER_SEED:
-                default:
-                    value = (index > 0);
-                    break;
-            }
-        #endif // CUB_INCLUDE_HOST_CODE
-    }
+  ));
 }
 
 
@@ -695,7 +681,7 @@ __host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, bool &value
  */
 __host__ __device__ __forceinline__ void InitValue(GenMode /* gen_mode */,
 						   CUB_NS_QUALIFIER::NullType &/* value */,
-						   int /* index */ = 0)
+                           std::size_t /* index */ = 0)
 {}
 
 
@@ -707,29 +693,25 @@ template <typename KeyT, typename ValueT>
 __host__ __device__ __forceinline__ void InitValue(
     GenMode                             gen_mode,
     CUB_NS_QUALIFIER::KeyValuePair<KeyT, ValueT>&    value,
-    int                                 index = 0)
+    std::size_t                                      index = 0)
 {
     InitValue(gen_mode, value.value, index);
 
     // This specialization only appears to be used by test_warp_scan.
     // It initializes with uniform values and random keys, so we need to
     // protect the call to the host-only RandomBits.
-    if (CUB_IS_DEVICE_CODE)
-    {
-        #if CUB_INCLUDE_DEVICE_CODE
-            _CubLog("%s\n",
-                    "cub::InitValue cannot generate random numbers on device.");
-            CUB_NS_QUALIFIER::ThreadTrap();
-        #endif // CUB_INCLUDE_DEVICE_CODE
-    }
-    else
-    {
-        #if CUB_INCLUDE_HOST_CODE
-            // Assign corresponding flag with a likelihood of the last bit being set with entropy-reduction level 3
-            RandomBits(value.key, 3);
-            value.key = (value.key & 0x1);
-        #endif // CUB_INCLUDE_HOST_CODE
-    }
+    // clang-format off
+    NV_IF_TARGET(NV_IS_HOST, (
+        // Assign corresponding flag with a likelihood of the last bit
+        // being set with entropy-reduction level 3
+        RandomBits(value.key, 3);
+        value.key = (value.key & 0x1);
+      ), ( // NV_IS_DEVICE
+        _CubLog("%s\n",
+                "cub::InitValue cannot generate random numbers on device.");
+        CUB_NS_QUALIFIER::ThreadTrap();
+      ));
+    // clang-format on
 }
 
 
@@ -748,6 +730,42 @@ std::ostream& operator<<(std::ostream& os, const CUB_NS_QUALIFIER::KeyValuePair<
     return os;
 }
 
+#if CUB_IS_INT128_ENABLED
+static std::ostream& operator<<(std::ostream& os, __uint128_t val)
+{
+  constexpr int max_digits = 40;
+  char buffer[max_digits] = {};
+  char* digit = buffer + max_digits;
+  static constexpr char ascii[] = "0123456789";
+
+  do 
+  {
+    digit--;
+    *digit = ascii[val % 10];
+    val /= 10;
+  }
+  while(val != 0);
+
+  for (; digit != buffer + max_digits; digit++) {
+    os << *digit;
+  }
+
+  return os;
+}
+
+static std::ostream& operator<<(std::ostream& os, __int128_t val)
+{
+  if (val < 0) {
+    __uint128_t tmp = -val;
+    os << '-' << tmp;
+  } else {
+    __uint128_t tmp = val;
+    os << tmp;
+  }
+
+  return os;
+}
+#endif
 
 /******************************************************************************
  * Comparison and ostream operators for CUDA vector types
@@ -756,401 +774,81 @@ std::ostream& operator<<(std::ostream& os, const CUB_NS_QUALIFIER::KeyValuePair<
 /**
  * Vector1 overloads
  */
-#define CUB_VEC_OVERLOAD_1(T, BaseT)                        \
-    /* Ostream output */                                    \
-    std::ostream& operator<<(                               \
-        std::ostream& os,                                   \
-        const T& val)                                       \
-    {                                                       \
-        os << '(' << CoutCast(val.x) << ')';                \
-        return os;                                          \
-    }                                                       \
-    /* Inequality */                                        \
-    __host__ __device__ __forceinline__ bool operator!=(    \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x != b.x);                                \
-    }                                                       \
-    /* Equality */                                          \
-    __host__ __device__ __forceinline__ bool operator==(    \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x == b.x);                                \
-    }                                                       \
-    /* Test initialization */                               \
-    __host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, T &value, int index = 0)   \
-    {                                                       \
-        InitValue(gen_mode, value.x, index);                \
-    }                                                       \
-    /* Max */                                               \
-    __host__ __device__ __forceinline__ bool operator>(     \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x > b.x);                                 \
-    }                                                       \
-    /* Min */                                               \
-    __host__ __device__ __forceinline__ bool operator<(     \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x < b.x);                                 \
-    }                                                       \
-    /* Summation (non-reference addends for VS2003 -O3 warpscan workaround */                       \
-    __host__ __device__ __forceinline__ T operator+(        \
-        T a,                                                \
-        T b)                                                \
-    {                                                       \
-        T retval = make_##T(a.x + b.x);                     \
-        return retval;                                      \
-    }                                                       \
-    CUB_NAMESPACE_BEGIN                                     \
-    template<>                                              \
-    struct NumericTraits<T>                                 \
-    {                                                       \
-        static const Category CATEGORY = NOT_A_NUMBER;      \
-        enum {                                              \
-            PRIMITIVE       = false,                        \
-            NULL_TYPE       = false,                        \
-        };                                                  \
-        static T Max()                                      \
-        {                                                   \
-            T retval = {                                    \
-                NumericTraits<BaseT>::Max()};               \
-            return retval;                                  \
-        }                                                   \
-        static T Lowest()                                   \
-        {                                                   \
-            T retval = {                                    \
-                NumericTraits<BaseT>::Lowest()};            \
-            return retval;                                  \
-        }                                                   \
-    };                                                      \
-    CUB_NAMESPACE_END
-
-
+#define CUB_VEC_OVERLOAD_1_OLD(T, BaseT)                                                           \
+  /* Test initialization */                                                                        \
+  __host__ __device__ __forceinline__ void InitValue(GenMode gen_mode,                             \
+                                                     T &value,                                     \
+                                                     std::size_t index = 0)                        \
+  {                                                                                                \
+    InitValue(gen_mode, value.x, index);                                                           \
+  }
 
 /**
  * Vector2 overloads
  */
-#define CUB_VEC_OVERLOAD_2(T, BaseT)                        \
-    /* Ostream output */                                    \
-    std::ostream& operator<<(                               \
-        std::ostream& os,                                   \
-        const T& val)                                       \
-    {                                                       \
-        os << '('                                           \
-            << CoutCast(val.x) << ','                       \
-            << CoutCast(val.y) << ')';                      \
-        return os;                                          \
-    }                                                       \
-    /* Inequality */                                        \
-    __host__ __device__ __forceinline__ bool operator!=(    \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x != b.x) ||                              \
-            (a.y != b.y);                                   \
-    }                                                       \
-    /* Equality */                                          \
-    __host__ __device__ __forceinline__ bool operator==(    \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x == b.x) &&                              \
-            (a.y == b.y);                                   \
-    }                                                       \
-    /* Test initialization */                               \
-    __host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, T &value, int index = 0)   \
-    {                                                       \
-        InitValue(gen_mode, value.x, index);                \
-        InitValue(gen_mode, value.y, index);                \
-    }                                                       \
-    /* Max */                                               \
-    __host__ __device__ __forceinline__ bool operator>(     \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        if (a.x > b.x) return true; else if (b.x > a.x) return false;   \
-        return a.y > b.y;                                               \
-    }                                                       \
-    /* Min */                                               \
-    __host__ __device__ __forceinline__ bool operator<(     \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        if (a.x < b.x) return true; else if (b.x < a.x) return false;   \
-        return a.y < b.y;                                               \
-    }                                                       \
-    /* Summation (non-reference addends for VS2003 -O3 warpscan workaround */                                         \
-    __host__ __device__ __forceinline__ T operator+(        \
-        T a,                                         \
-        T b)                                         \
-    {                                                       \
-        T retval = make_##T(                                        \
-            a.x + b.x,                                      \
-            a.y + b.y);                                     \
-        return retval;                                      \
-    }                                                       \
-    CUB_NAMESPACE_BEGIN                                         \
-    template<>                                              \
-    struct NumericTraits<T>                                 \
-    {                                                       \
-        static const Category CATEGORY = NOT_A_NUMBER;      \
-        enum {                                              \
-            PRIMITIVE       = false,                        \
-            NULL_TYPE       = false,                        \
-        };                                                  \
-        static T Max()                                      \
-        {                                                   \
-            T retval = {                                    \
-                NumericTraits<BaseT>::Max(),                \
-                NumericTraits<BaseT>::Max()};               \
-            return retval;                                  \
-        }                                                   \
-        static T Lowest()                                   \
-        {                                                   \
-            T retval = {                                    \
-                NumericTraits<BaseT>::Lowest(),             \
-                NumericTraits<BaseT>::Lowest()};            \
-            return retval;                                  \
-        }                                                   \
-    };                                                      \
-    CUB_NAMESPACE_END
-
-
+#define CUB_VEC_OVERLOAD_2_OLD(T, BaseT)                                                           \
+  /* Test initialization */                                                                        \
+  __host__ __device__ __forceinline__ void InitValue(GenMode gen_mode,                             \
+                                                     T &value,                                     \
+                                                     std::size_t index = 0)                        \
+  {                                                                                                \
+    InitValue(gen_mode, value.x, index);                                                           \
+    InitValue(gen_mode, value.y, index);                                                           \
+  }
 
 /**
  * Vector3 overloads
  */
-#define CUB_VEC_OVERLOAD_3(T, BaseT)                        \
-    /* Ostream output */                                    \
-    std::ostream& operator<<(                               \
-        std::ostream& os,                                   \
-        const T& val)                                       \
-    {                                                       \
-        os << '('                                           \
-            << CoutCast(val.x) << ','                       \
-            << CoutCast(val.y) << ','                       \
-            << CoutCast(val.z) << ')';                      \
-        return os;                                          \
-    }                                                       \
-    /* Inequality */                                        \
-    __host__ __device__ __forceinline__ bool operator!=(    \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x != b.x) ||                              \
-            (a.y != b.y) ||                                 \
-            (a.z != b.z);                                   \
-    }                                                       \
-    /* Equality */                                          \
-    __host__ __device__ __forceinline__ bool operator==(    \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x == b.x) &&                              \
-            (a.y == b.y) &&                                 \
-            (a.z == b.z);                                   \
-    }                                                       \
-    /* Test initialization */                               \
-    __host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, T &value, int index = 0)   \
-    {                                                       \
-        InitValue(gen_mode, value.x, index);                \
-        InitValue(gen_mode, value.y, index);                \
-        InitValue(gen_mode, value.z, index);                \
-    }                                                       \
-    /* Max */                                               \
-    __host__ __device__ __forceinline__ bool operator>(     \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        if (a.x > b.x) return true; else if (b.x > a.x) return false;   \
-        if (a.y > b.y) return true; else if (b.y > a.y) return false;   \
-        return a.z > b.z;                                               \
-    }                                                       \
-    /* Min */                                               \
-    __host__ __device__ __forceinline__ bool operator<(     \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        if (a.x < b.x) return true; else if (b.x < a.x) return false;   \
-        if (a.y < b.y) return true; else if (b.y < a.y) return false;   \
-        return a.z < b.z;                                               \
-    }                                                       \
-    /* Summation (non-reference addends for VS2003 -O3 warpscan workaround */                                         \
-    __host__ __device__ __forceinline__ T operator+(        \
-        T a,                                                \
-        T b)                                                \
-    {                                                       \
-        T retval = make_##T(                                        \
-            a.x + b.x,                                      \
-            a.y + b.y,                                      \
-            a.z + b.z);                                     \
-        return retval;                                      \
-    }                                                       \
-    CUB_NAMESPACE_BEGIN                                     \
-    template<>                                              \
-    struct NumericTraits<T>                                 \
-    {                                                       \
-        static const Category CATEGORY = NOT_A_NUMBER;      \
-        enum {                                              \
-            PRIMITIVE       = false,                        \
-            NULL_TYPE       = false,                        \
-        };                                                  \
-        static T Max()                                      \
-        {                                                   \
-            T retval = {                                    \
-                NumericTraits<BaseT>::Max(),                \
-                NumericTraits<BaseT>::Max(),                \
-                NumericTraits<BaseT>::Max()};               \
-            return retval;                                  \
-        }                                                   \
-        static T Lowest()                                   \
-        {                                                   \
-            T retval = {                                    \
-                NumericTraits<BaseT>::Lowest(),             \
-                NumericTraits<BaseT>::Lowest(),             \
-                NumericTraits<BaseT>::Lowest()};            \
-            return retval;                                  \
-        }                                                   \
-    };                                                      \
-    CUB_NAMESPACE_END
-
+#define CUB_VEC_OVERLOAD_3_OLD(T, BaseT)                                                           \
+  /* Test initialization */                                                                        \
+  __host__ __device__ __forceinline__ void InitValue(GenMode gen_mode,                             \
+                                                     T &value,                                     \
+                                                     std::size_t index = 0)                        \
+  {                                                                                                \
+    InitValue(gen_mode, value.x, index);                                                           \
+    InitValue(gen_mode, value.y, index);                                                           \
+    InitValue(gen_mode, value.z, index);                                                           \
+  }
 
 /**
  * Vector4 overloads
  */
-#define CUB_VEC_OVERLOAD_4(T, BaseT)                        \
-    /* Ostream output */                                    \
-    std::ostream& operator<<(                               \
-        std::ostream& os,                                   \
-        const T& val)                                       \
-    {                                                       \
-        os << '('                                           \
-            << CoutCast(val.x) << ','                       \
-            << CoutCast(val.y) << ','                       \
-            << CoutCast(val.z) << ','                       \
-            << CoutCast(val.w) << ')';                      \
-        return os;                                          \
-    }                                                       \
-    /* Inequality */                                        \
-    __host__ __device__ __forceinline__ bool operator!=(    \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x != b.x) ||                              \
-            (a.y != b.y) ||                                 \
-            (a.z != b.z) ||                                 \
-            (a.w != b.w);                                   \
-    }                                                       \
-    /* Equality */                                          \
-    __host__ __device__ __forceinline__ bool operator==(    \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        return (a.x == b.x) &&                              \
-            (a.y == b.y) &&                                 \
-            (a.z == b.z) &&                                 \
-            (a.w == b.w);                                   \
-    }                                                       \
-    /* Test initialization */                               \
-    __host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, T &value, int index = 0)   \
-    {                                                       \
-        InitValue(gen_mode, value.x, index);                \
-        InitValue(gen_mode, value.y, index);                \
-        InitValue(gen_mode, value.z, index);                \
-        InitValue(gen_mode, value.w, index);                \
-    }                                                       \
-    /* Max */                                               \
-    __host__ __device__ __forceinline__ bool operator>(     \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        if (a.x > b.x) return true; else if (b.x > a.x) return false;   \
-        if (a.y > b.y) return true; else if (b.y > a.y) return false;   \
-        if (a.z > b.z) return true; else if (b.z > a.z) return false;   \
-        return a.w > b.w;                                               \
-    }                                                       \
-    /* Min */                                               \
-    __host__ __device__ __forceinline__ bool operator<(     \
-        const T &a,                                         \
-        const T &b)                                         \
-    {                                                       \
-        if (a.x < b.x) return true; else if (b.x < a.x) return false;   \
-        if (a.y < b.y) return true; else if (b.y < a.y) return false;   \
-        if (a.z < b.z) return true; else if (b.z < a.z) return false;   \
-        return a.w < b.w;                                               \
-    }                                                       \
-    /* Summation (non-reference addends for VS2003 -O3 warpscan workaround */                                         \
-    __host__ __device__ __forceinline__ T operator+(        \
-        T a,                                                \
-        T b)                                                \
-    {                                                       \
-        T retval = make_##T(                                        \
-            a.x + b.x,                                      \
-            a.y + b.y,                                      \
-            a.z + b.z,                                      \
-            a.w + b.w);                                     \
-        return retval;                                      \
-    }                                                       \
-    CUB_NAMESPACE_BEGIN                                     \
-    template<>                                              \
-    struct NumericTraits<T>                                 \
-    {                                                       \
-        static const Category CATEGORY = NOT_A_NUMBER;      \
-        enum {                                              \
-            PRIMITIVE       = false,                        \
-            NULL_TYPE       = false,                        \
-        };                                                  \
-        static T Max()                                      \
-        {                                                   \
-            T retval = {                                    \
-                NumericTraits<BaseT>::Max(),                \
-                NumericTraits<BaseT>::Max(),                \
-                NumericTraits<BaseT>::Max(),                \
-                NumericTraits<BaseT>::Max()};               \
-            return retval;                                  \
-        }                                                   \
-        static T Lowest()                                   \
-        {                                                   \
-            T retval = {                                    \
-                NumericTraits<BaseT>::Lowest(),             \
-                NumericTraits<BaseT>::Lowest(),             \
-                NumericTraits<BaseT>::Lowest(),             \
-                NumericTraits<BaseT>::Lowest()};            \
-            return retval;                                  \
-        }                                                   \
-    };                                                      \
-    CUB_NAMESPACE_END
+#define CUB_VEC_OVERLOAD_4_OLD(T, BaseT)                                                           \
+  /* Test initialization */                                                                        \
+  __host__ __device__ __forceinline__ void InitValue(GenMode gen_mode,                             \
+                                                     T &value,                                     \
+                                                     std::size_t index = 0)                        \
+  {                                                                                                \
+    InitValue(gen_mode, value.x, index);                                                           \
+    InitValue(gen_mode, value.y, index);                                                           \
+    InitValue(gen_mode, value.z, index);                                                           \
+    InitValue(gen_mode, value.w, index);                                                           \
+  }
 
 /**
  * All vector overloads
  */
-#define CUB_VEC_OVERLOAD(COMPONENT_T, BaseT)                    \
-    CUB_VEC_OVERLOAD_1(COMPONENT_T##1, BaseT)                   \
-    CUB_VEC_OVERLOAD_2(COMPONENT_T##2, BaseT)                   \
-    CUB_VEC_OVERLOAD_3(COMPONENT_T##3, BaseT)                   \
-    CUB_VEC_OVERLOAD_4(COMPONENT_T##4, BaseT)
+#define CUB_VEC_OVERLOAD_OLD(COMPONENT_T, BaseT)                                                   \
+  CUB_VEC_OVERLOAD_1_OLD(COMPONENT_T##1, BaseT)                                                    \
+  CUB_VEC_OVERLOAD_2_OLD(COMPONENT_T##2, BaseT)                                                    \
+  CUB_VEC_OVERLOAD_3_OLD(COMPONENT_T##3, BaseT)                                                    \
+  CUB_VEC_OVERLOAD_4_OLD(COMPONENT_T##4, BaseT)
 
 /**
  * Define for types
  */
-CUB_VEC_OVERLOAD(char, char)
-CUB_VEC_OVERLOAD(short, short)
-CUB_VEC_OVERLOAD(int, int)
-CUB_VEC_OVERLOAD(long, long)
-CUB_VEC_OVERLOAD(longlong, long long)
-CUB_VEC_OVERLOAD(uchar, unsigned char)
-CUB_VEC_OVERLOAD(ushort, unsigned short)
-CUB_VEC_OVERLOAD(uint, unsigned int)
-CUB_VEC_OVERLOAD(ulong, unsigned long)
-CUB_VEC_OVERLOAD(ulonglong, unsigned long long)
-CUB_VEC_OVERLOAD(float, float)
-CUB_VEC_OVERLOAD(double, double)
-
+CUB_VEC_OVERLOAD_OLD(char, signed char)
+CUB_VEC_OVERLOAD_OLD(short, short)
+CUB_VEC_OVERLOAD_OLD(int, int)
+CUB_VEC_OVERLOAD_OLD(long, long)
+CUB_VEC_OVERLOAD_OLD(longlong, long long)
+CUB_VEC_OVERLOAD_OLD(uchar, unsigned char)
+CUB_VEC_OVERLOAD_OLD(ushort, unsigned short)
+CUB_VEC_OVERLOAD_OLD(uint, unsigned int)
+CUB_VEC_OVERLOAD_OLD(ulong, unsigned long)
+CUB_VEC_OVERLOAD_OLD(ulonglong, unsigned long long)
+CUB_VEC_OVERLOAD_OLD(float, float)
+CUB_VEC_OVERLOAD_OLD(double, double)
 
 //---------------------------------------------------------------------
 // Complex data type TestFoo
@@ -1238,7 +936,7 @@ std::ostream& operator<<(std::ostream& os, const TestFoo& val)
 /**
  * TestFoo test initialization
  */
-__host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, TestFoo &value, int index = 0)
+__host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, TestFoo &value, std::size_t index = 0)
 {
     InitValue(gen_mode, value.x, index);
     InitValue(gen_mode, value.y, index);
@@ -1252,12 +950,12 @@ CUB_NAMESPACE_BEGIN
 template<>
 struct NumericTraits<TestFoo>
 {
-    static const Category CATEGORY = NOT_A_NUMBER;
+    static constexpr Category CATEGORY = NOT_A_NUMBER;
     enum {
         PRIMITIVE       = false,
         NULL_TYPE       = false,
     };
-    static TestFoo Max()
+  __host__ __device__ static TestFoo Max()
     {
         return TestFoo::MakeTestFoo(
             NumericTraits<long long>::Max(),
@@ -1266,7 +964,7 @@ struct NumericTraits<TestFoo>
             NumericTraits<char>::Max());
     }
 
-    static TestFoo Lowest()
+  __host__ __device__ static TestFoo Lowest()
     {
         return TestFoo::MakeTestFoo(
             NumericTraits<long long>::Lowest(),
@@ -1357,7 +1055,7 @@ std::ostream& operator<<(std::ostream& os, const TestBar& val)
 /**
  * TestBar test initialization
  */
-__host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, TestBar &value, int index = 0)
+__host__ __device__ __forceinline__ void InitValue(GenMode gen_mode, TestBar &value, std::size_t index = 0)
 {
     InitValue(gen_mode, value.x, index);
     InitValue(gen_mode, value.y, index);
@@ -1368,19 +1066,19 @@ CUB_NAMESPACE_BEGIN
 template<>
 struct NumericTraits<TestBar>
 {
-    static const Category CATEGORY = NOT_A_NUMBER;
+    static constexpr Category CATEGORY = NOT_A_NUMBER;
     enum {
         PRIMITIVE       = false,
         NULL_TYPE       = false,
     };
-    static TestBar Max()
+    __host__ __device__ static TestBar Max()
     {
         return TestBar(
             NumericTraits<long long>::Max(),
             NumericTraits<int>::Max());
     }
 
-    static TestBar Lowest()
+    __host__ __device__ static TestBar Lowest()
     {
         return TestBar(
             NumericTraits<long long>::Lowest(),
@@ -1428,7 +1126,7 @@ int CompareResults(float* computed, float* reference, OffsetT len, bool verbose 
             float difference = std::abs(computed[i]-reference[i]);
             float fraction = difference / std::abs(reference[i]);
 
-            if (fraction > 0.0001)
+            if (fraction > 0.00015)
             {
                 if (verbose) std::cout << "INCORRECT: [" << i << "]: "
                     << "(computed) " << CoutCast(computed[i]) << " != "
@@ -1463,7 +1161,7 @@ int CompareResults(double* computed, double* reference, OffsetT len, bool verbos
             double difference = std::abs(computed[i]-reference[i]);
             double fraction = difference / std::abs(reference[i]);
 
-            if (fraction > 0.0001)
+            if (fraction > 0.00015)
             {
                 if (verbose) std::cout << "INCORRECT: [" << i << "]: "
                     << CoutCast(computed[i]) << " != "
@@ -1496,11 +1194,11 @@ int CompareDeviceResults(
  */
 template <typename S, typename OffsetT>
 int CompareDeviceResults(
-    S *h_reference,
-    CUB_NS_QUALIFIER::DiscardOutputIterator<OffsetT> d_data,
-    std::size_t num_items,
-    bool verbose = true,
-    bool display_data = false)
+    S */*h_reference*/,
+    CUB_NS_QUALIFIER::DiscardOutputIterator<OffsetT> /*d_data*/,
+    std::size_t /*num_items*/,
+    bool /*verbose*/ = true,
+    bool /*display_data*/ = false)
 {
     return 0;
 }
@@ -1517,6 +1215,11 @@ int CompareDeviceResults(
     bool verbose = true,
     bool display_data = false)
 {
+    if (num_items == 0)
+    {
+        return 0;
+    }
+
     // Allocate array on host
     T *h_data = (T*) malloc(num_items * sizeof(T));
 
@@ -1649,22 +1352,23 @@ void DisplayDeviceResults(
 /**
  * Initialize segments
  */
+template <typename OffsetT>
 void InitializeSegments(
-    int     num_items,
-    int     num_segments,
-    int     *h_segment_offsets,
-    bool    verbose = false)
+    OffsetT     num_items,
+    int         num_segments,
+    OffsetT     *h_segment_offsets,
+    bool        verbose = false)
 {
     if (num_segments <= 0)
         return;
 
-    unsigned int expected_segment_length = CUB_NS_QUALIFIER::DivideAndRoundUp(num_items, num_segments);
-    int offset = 0;
+    OffsetT expected_segment_length = CUB_NS_QUALIFIER::DivideAndRoundUp(num_items, OffsetT(num_segments));
+    OffsetT offset = 0;
     for (int i = 0; i < num_segments; ++i)
     {
         h_segment_offsets[i] = offset;
 
-        unsigned int segment_length = RandomValue((expected_segment_length * 2) + 1);
+        OffsetT segment_length = RandomValue((expected_segment_length * 2) + 1);
         offset += segment_length;
         offset = CUB_MIN(offset, num_items);
     }
@@ -1776,9 +1480,10 @@ struct GpuTimer
     }
 };
 
+template <int ELEMENTS_PER_OBJECT_ = 128>
 struct HugeDataType
 {
-  static constexpr int ELEMENTS_PER_OBJECT = 128;
+  static constexpr int ELEMENTS_PER_OBJECT = ELEMENTS_PER_OBJECT_;
 
   __device__ __host__ HugeDataType()
   {
@@ -1788,7 +1493,7 @@ struct HugeDataType
     }
   }
 
-  __device__ __host__ HugeDataType(const HugeDataType&rhs)
+  __device__ __host__ HugeDataType(const HugeDataType& rhs)
   {
     for (int i = 0; i < ELEMENTS_PER_OBJECT; i++)
     {
@@ -1804,13 +1509,26 @@ struct HugeDataType
     }
   }
 
+  __device__ __host__ HugeDataType& operator=(const HugeDataType& rhs)
+  {
+    if (this != &rhs)
+    {
+      for (int i = 0; i < ELEMENTS_PER_OBJECT; i++)
+      {
+        data[i] = rhs.data[i];
+      }
+    }
+    return *this;
+  }
+
   int data[ELEMENTS_PER_OBJECT];
 };
 
-inline __device__ __host__ bool operator==(const HugeDataType &lhs,
-                                           const HugeDataType &rhs)
+template <int ELEMENTS_PER_OBJECT>
+inline __device__ __host__ bool
+operator==(const HugeDataType<ELEMENTS_PER_OBJECT>& lhs, const HugeDataType<ELEMENTS_PER_OBJECT>& rhs)
 {
-  for (int i = 0; i < HugeDataType::ELEMENTS_PER_OBJECT; i++)
+  for (int i = 0; i < ELEMENTS_PER_OBJECT; i++)
   {
     if (lhs.data[i] != rhs.data[i])
     {
@@ -1821,10 +1539,11 @@ inline __device__ __host__ bool operator==(const HugeDataType &lhs,
   return true;
 }
 
-inline __device__ __host__ bool operator<(const HugeDataType &lhs,
-                                          const HugeDataType &rhs)
+template <int ELEMENTS_PER_OBJECT>
+inline __device__ __host__ bool
+operator<(const HugeDataType<ELEMENTS_PER_OBJECT>& lhs, const HugeDataType<ELEMENTS_PER_OBJECT>& rhs)
 {
-  for (int i = 0; i < HugeDataType::ELEMENTS_PER_OBJECT; i++)
+  for (int i = 0; i < ELEMENTS_PER_OBJECT; i++)
   {
     if (lhs.data[i] < rhs.data[i])
     {
@@ -1835,11 +1554,10 @@ inline __device__ __host__ bool operator<(const HugeDataType &lhs,
   return false;
 }
 
-template <typename DataType>
-__device__ __host__ bool operator!=(const HugeDataType &lhs,
-                                    const DataType &rhs)
+template <typename DataType, int ELEMENTS_PER_OBJECT>
+__device__ __host__ bool operator!=(const HugeDataType<ELEMENTS_PER_OBJECT>& lhs, const DataType& rhs)
 {
-  for (int i = 0; i < HugeDataType::ELEMENTS_PER_OBJECT; i++)
+  for (int i = 0; i < ELEMENTS_PER_OBJECT; i++)
   {
     if (lhs.data[i] != rhs)
     {
@@ -1848,4 +1566,23 @@ __device__ __host__ bool operator!=(const HugeDataType &lhs,
   }
 
   return false;
+}
+
+
+template <int ELEMENTS_PER_OBJECT>
+std::ostream& 
+operator<<(std::ostream& os, 
+const HugeDataType<ELEMENTS_PER_OBJECT>& val)
+{
+  os << '(';
+  for (int i = 0; i < ELEMENTS_PER_OBJECT; i++)
+  {
+    os << CoutCast(val.data[i]);
+    if (i < ELEMENTS_PER_OBJECT - 1)
+    {
+      os << ',';
+    }
+  }
+  os << ')';
+  return os;
 }
